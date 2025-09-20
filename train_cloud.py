@@ -338,6 +338,8 @@ def main():
                         help='Learning rate')
     parser.add_argument('--batch_size', type=int, default=4,
                         help='Batch size')
+    parser.add_argument('--gradient_accumulation_steps', type=int, default=1,
+                        help='Gradient accumulation steps')
     parser.add_argument('--eval_interval', type=int, default=100,
                         help='Evaluation interval')
     parser.add_argument('--save_interval', type=int, default=200,
@@ -348,12 +350,19 @@ def main():
                         help='Directory for logs')
     parser.add_argument('--device', type=str, default='auto',
                         help='Device to use (auto, cpu, cuda, mps)')
+    parser.add_argument('--mixed_precision', type=str, default='false',
+                        help='Use mixed precision training (true/false)')
     
     args = parser.parse_args()
+    
+    # Convert string boolean to actual boolean
+    args.mixed_precision = args.mixed_precision.lower() == 'true'
     
     # Set up logging
     logger = setup_logging(args.log_dir)
     logger.info(f"Starting training with args: {args}")
+    logger.info(f"Mixed precision: {args.mixed_precision}")
+    logger.info(f"Gradient accumulation steps: {args.gradient_accumulation_steps}")
     
     # Configuration
     if args.model_size == 'nano':

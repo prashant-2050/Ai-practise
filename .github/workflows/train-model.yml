@@ -84,10 +84,15 @@ jobs:
     
     - name: Train model
       run: |
+        echo "🚀 Starting training..."
         python train_cloud.py \
-          --model_size ${{ env.MODEL_SIZE }} \
-          --max_steps ${{ env.MAX_STEPS }} \
-          --learning_rate ${{ env.LEARNING_RATE }} \
+          --model_size "$MODEL_SIZE" \
+          --max_steps "$MAX_STEPS" \
+          --learning_rate "$LEARNING_RATE" \
+          --batch_size "${BATCH_SIZE:-32}" \
+          --gradient_accumulation_steps "${GRAD_ACCUM_STEPS:-1}" \
+          --device "${DEVICE:-auto}" \
+          --mixed_precision "${GPU_AVAILABLE:-false}" \
           --save_dir checkpoints \
           --log_dir logs \
           --eval_interval 100 \
@@ -96,12 +101,17 @@ jobs:
     - name: Generate sample outputs
       run: |
         echo "🎭 Generating sample outputs..."
-        python generate.py \
-          --checkpoint checkpoints/best_model.pt \
-          --prompt "To be or not to be" \
-          --max_tokens 100 \
-          --temperature 0.8 \
-          > sample_outputs.txt
+        if [ -f "checkpoints/best_model.pt" ]; then
+          python generate_cli.py \
+            --checkpoint checkpoints/best_model.pt \
+            --prompt "To be or not to be" \
+            --max_tokens 100 \
+            --temperature 0.8 \
+            > sample_outputs.txt
+        else
+          echo "No best model found, using demo mode..."
+          python generate.py demo > sample_outputs.txt
+        fi
         
         echo "## 📝 Sample Generated Text" >> training_summary.md
         echo '```' >> training_summary.md
