@@ -1,0 +1,447 @@
+name: Automated ML Pipeline
+
+on:
+  workflow_dispatch:
+    inputs:
+      trigger_training:
+        description: 'Trigger Colab training'
+        required: false
+        default: true
+        type: boolean
+      model_size:
+        description: 'Model size to train'
+        required: true
+        default: 'micro'
+        type: choice
+        options:
+          - nano
+          - micro
+          - small
+      max_steps:
+        description: 'Maximum training steps'
+        required: true
+        default: '3000'
+        type: string
+      auto_deploy:
+        description: 'Auto-deploy after training'
+        required: true
+        default: true
+        type: boolean
+  
+  # Trigger when training results are pushed
+  push:
+    paths:
+      - 'checkpoints/*.pt'
+      - 'logs/training_progress.json'
+    branches:
+      - main
+
+env:
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  orchestrate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180  # 3 hours for full pipeline
+    
+    outputs:
+      training_triggered: ${{ steps.training.outputs.triggered }}
+      model_path: ${{ steps.detect.outputs.model_path }}
+      model_name: ${{ steps.detect.outputs.model_name }}
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        cache: 'pip'
+    
+    - name: Install pipeline dependencies
+      run: |
+        pip install requests flask pyngrok
+        pip install -r requirements.txt
+    
+    - name: Trigger Colab Training
+      id: training
+      if: github.event.inputs.trigger_training == 'true'
+      run: |
+        echo "🚀 Triggering Colab training..."
+        
+        # Use the automated pipeline script
+        python pipeline.py \
+          --model_size "${{ github.event.inputs.model_size || 'micro' }}" \
+          --max_steps "${{ github.event.inputs.max_steps || '3000' }}" \
+          --auto_deploy false
+        
+        echo "triggered=true" >> $GITHUB_OUTPUT
+    
+    - name: Wait for Training Completion
+      if: steps.training.outputs.triggered == 'true'
+      run: |
+        echo "⏳ Waiting for training completion..."
+        echo "📊 Monitoring repository for new model files..."
+        
+        # Monitor for new commits with model files
+        start_time=$(date +%s)
+        timeout=7200  # 2 hours timeout
+        
+        while [ $(($(date +%s) - start_time)) -lt $timeout ]; do
+          echo "🔍 Checking for new model files..."
+          
+          # Check if new .pt files were added recently
+          if find checkpoints -name "*.pt" -newermt "5 minutes ago" 2>/dev/null | grep -q .; then
+            echo "✅ New model files detected!"
+            break
+          fi
+          
+          echo "⏳ Waiting... ($(( ($(date +%s) - start_time) / 60 )) minutes elapsed)"
+          sleep 60
+        done
+        
+        if [ $(($(date +%s) - start_time)) -ge $timeout ]; then
+          echo "⏰ Training timeout - continuing with existing models"
+        fi
+    
+    - name: Detect Latest Model
+      id: detect
+      run: |
+        echo "🔍 Detecting latest trained model..."
+        
+        # Find the most recent model file
+        if [ -d "checkpoints" ] && [ "$(ls -A checkpoints/*.pt 2>/dev/null)" ]; then
+          latest_model=$(ls -t checkpoints/*.pt | head -1)
+          echo "📁 Latest model: $latest_model"
+          echo "model_path=$latest_model" >> $GITHUB_OUTPUT
+          
+          # Generate model name based on timestamp and config
+          timestamp=$(date +%Y%m%d_%H%M%S)
+          model_size="${{ github.event.inputs.model_size || 'micro' }}"
+          model_name="llm-${model_size}-${timestamp}"
+          echo "🏷️ Model name: $model_name"
+          echo "model_name=$model_name" >> $GITHUB_OUTPUT
+        else
+          echo "❌ No model files found!"
+          exit 1
+        fi
+    
+    - name: Validate Model
+      run: |
+        echo "🧪 Validating model file..."
+        python validate_model.py "${{ steps.detect.outputs.model_path }}"
+    
+    - name: Generate Test Sample
+      run: |
+        echo "🎭 Generating test sample..."
+        python generate_cli.py \
+          --checkpoint "${{ steps.detect.outputs.model_path }}" \
+          --prompt "To be or not to be" \
+          --max_tokens 100 \
+          --temperature 0.8 > test_generation.txt
+        
+        echo "📝 Generated sample:"
+        cat test_generation.txt
+    
+    - name: Create Model Package
+      run: |
+        echo "� Creating model package..."
+        model_name="${{ steps.detect.outputs.model_name }}"
+        
+        # Create package directory
+        mkdir -p "packages/$model_name"
+        
+        # Copy model files
+        cp "${{ steps.detect.outputs.model_path }}" "packages/$model_name/"
+        cp test_generation.txt "packages/$model_name/"
+        
+        # Create model info JSON
+        cat > "packages/$model_name/model_info.json" << EOF
+{
+  "name": "$model_name",
+  "created_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "repository": "prashant-2050/Ai-practise",
+  "training_method": "Google Colab",
+  "model_size": "${{ github.event.inputs.model_size || 'micro' }}",
+  "max_steps": "${{ github.event.inputs.max_steps || '3000' }}",
+  "files": [
+    "$(basename ${{ steps.detect.outputs.model_path }})",
+    "test_generation.txt",
+    "model_info.json"
+  ]
+}
+EOF
+        
+        echo "✅ Package created: packages/$model_name"
+        ls -la "packages/$model_name"
+    
+    - name: Generate Test Sample
+      run: |
+        echo "🎭 Generating test sample..."
+        model_path="${{ steps.detect.outputs.model_path }}"
+        
+        python generate_cli.py \
+          --checkpoint "$model_path" \
+          --prompt "To be or not to be" \
+          --max_tokens 100 \
+          --temperature 0.8 > test_generation.txt
+        
+        echo "📝 Generated sample:"
+        cat test_generation.txt
+    
+    - name: Create Model Package
+      run: |
+        echo "📦 Creating model package..."
+        model_name="${{ steps.detect.outputs.model_name }}"
+        
+        # Create package directory
+        mkdir -p "packages/$model_name"
+        
+        # Copy model files
+        cp "${{ steps.detect.outputs.model_path }}" "packages/$model_name/"
+        cp test_generation.txt "packages/$model_name/"
+        
+        # Create model info
+        cat > "packages/$model_name/model_info.json" << EOF
+{
+  "name": "$model_name",
+  "created_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "repository": "prashant-2050/Ai-practise",
+  "training_method": "Google Colab",
+  "model_size": "${{ github.event.inputs.model_size || 'micro' }}",
+  "max_steps": "${{ github.event.inputs.max_steps || '3000' }}",
+  "files": [
+    "$(basename ${{ steps.detect.outputs.model_path }})",
+    "test_generation.txt",
+    "model_info.json"
+  ]
+}
+EOF
+        
+        echo "✅ Package created: packages/$model_name"
+        ls -la "packages/$model_name"
+    
+    - name: Upload Package Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: model-package-${{ steps.detect.outputs.model_name }}
+        path: packages/${{ steps.detect.outputs.model_name }}/
+        retention-days: 30
+  
+  deploy:
+    needs: orchestrate
+    if: github.event.inputs.auto_deploy == 'true' || github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    - name: Download Model Package
+      uses: actions/download-artifact@v4
+      with:
+        name: model-package-${{ needs.orchestrate.outputs.model_name }}
+        path: model_package/
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        cache: 'pip'
+    
+    - name: Install deployment dependencies
+      run: |
+        pip install huggingface_hub gradio
+        pip install -r requirements.txt
+    
+    - name: Deploy to Hugging Face
+      if: env.HF_TOKEN != ''
+      env:
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        HF_USERNAME: ${{ secrets.HF_USERNAME }}
+      run: |
+        echo "🚀 Deploying to Hugging Face..."
+        model_name="${{ needs.orchestrate.outputs.model_name }}"
+        username="${HF_USERNAME:-prashant-2050}"
+        
+        python -c "
+import os
+from huggingface_hub import HfApi, login, create_repo
+import json
+
+# Login
+token = os.environ['HF_TOKEN']
+login(token=token)
+api = HfApi()
+
+# Repository info
+username = '$username'
+model_name = '$model_name'
+repo_id = f'{username}/{model_name}'
+
+print(f'📤 Uploading to: {repo_id}')
+
+try:
+    # Create repository
+    create_repo(repo_id, repo_type='model', exist_ok=True)
+    print('✅ Repository created/exists')
+    
+    # Upload model file
+    model_files = os.listdir('model_package/')
+    for file in model_files:
+        if file.endswith('.pt'):
+            api.upload_file(
+                path_or_fileobj=f'model_package/{file}',
+                path_in_repo='pytorch_model.pt',
+                repo_id=repo_id
+            )
+            print(f'✅ Uploaded: {file}')
+            break
+    
+    # Upload model info
+    if 'model_info.json' in model_files:
+        api.upload_file(
+            path_or_fileobj='model_package/model_info.json',
+            path_in_repo='model_info.json',
+            repo_id=repo_id
+        )
+        print('✅ Uploaded: model_info.json')
+    
+    # Upload test generation
+    if 'test_generation.txt' in model_files:
+        api.upload_file(
+            path_or_fileobj='model_package/test_generation.txt',
+            path_in_repo='sample_generation.txt',
+            repo_id=repo_id
+        )
+        print('✅ Uploaded: sample_generation.txt')
+    
+    # Create README
+    readme_content = f'''# {model_name}
+
+A custom transformer model trained using Google Colab.
+
+## Model Details
+- **Architecture**: Custom Light LLM
+- **Training**: Google Colab (GPU)
+- **Repository**: [prashant-2050/Ai-practise](https://github.com/prashant-2050/Ai-practise)
+
+## Usage
+
+```python
+import torch
+
+# Load model
+checkpoint = torch.load('pytorch_model.pt', map_location='cpu')
+# ... model loading code ...
+```
+
+## Training
+
+This model was trained using our automated pipeline:
+1. Google Colab for GPU training
+2. GitHub Actions for deployment
+3. Automatic upload to Hugging Face Hub
+
+See the [repository](https://github.com/prashant-2050/Ai-practise) for full training code and pipeline setup.
+'''
+    
+    # Upload README
+    with open('README.md', 'w') as f:
+        f.write(readme_content)
+    
+    api.upload_file(
+        path_or_fileobj='README.md',
+        path_in_repo='README.md',
+        repo_id=repo_id
+    )
+    print('✅ Uploaded: README.md')
+    
+    print(f'🎉 Deployment complete: https://huggingface.co/{repo_id}')
+    
+except Exception as e:
+    print(f'❌ Deployment failed: {e}')
+    exit(1)
+"
+    
+    - name: Create Gradio Demo
+      run: |
+        echo "🎭 Creating Gradio demo..."
+        model_name="${{ needs.orchestrate.outputs.model_name }}"
+        
+        cat > demo_app.py << 'EOF'
+import gradio as gr
+import torch
+import os
+
+# Model loading (placeholder - adapt based on your model structure)
+def load_model():
+    # TODO: Implement proper model loading
+    return None
+
+def generate_text(prompt, max_tokens, temperature):
+    # TODO: Implement text generation
+    return f"Generated text for: {prompt}"
+
+# Create Gradio interface
+demo = gr.Interface(
+    fn=generate_text,
+    inputs=[
+        gr.Textbox(label="Prompt", placeholder="Enter your prompt...", value="To be or not to be"),
+        gr.Slider(minimum=10, maximum=500, value=100, label="Max Tokens"),
+        gr.Slider(minimum=0.1, maximum=2.0, value=0.8, label="Temperature")
+    ],
+    outputs=gr.Textbox(label="Generated Text", lines=10),
+    title=f"🎭 {model_name} Text Generator",
+    description="Generate text using a custom-trained transformer model.",
+    examples=[
+        ["To be or not to be", 100, 0.8],
+        ["Once upon a time", 150, 0.9],
+        ["In fair Verona", 80, 0.7]
+    ]
+)
+
+if __name__ == "__main__":
+    demo.launch()
+EOF
+        
+        echo "✅ Gradio demo created"
+    
+    - name: Upload Demo Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: gradio-demo-${{ needs.orchestrate.outputs.model_name }}
+        path: demo_app.py
+        retention-days: 30
+  
+  notify:
+    needs: [orchestrate, deploy]
+    if: always()
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Pipeline Summary
+      run: |
+        echo "## 🎉 Automated ML Pipeline Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Model**: ${{ needs.orchestrate.outputs.model_name || 'Unknown' }}" >> $GITHUB_STEP_SUMMARY
+        echo "**Training**: ${{ needs.orchestrate.outputs.training_triggered && 'Completed' || 'Skipped' }}" >> $GITHUB_STEP_SUMMARY
+        echo "**Deployment**: ${{ needs.deploy.result == 'success' && 'Success' || 'Failed/Skipped' }}" >> $GITHUB_STEP_SUMMARY
+        echo "**Timestamp**: $(date)" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        if [ "${{ needs.deploy.result }}" == "success" ]; then
+          echo "🚀 **Hugging Face**: https://huggingface.co/${HF_USERNAME:-prashant-2050}/${{ needs.orchestrate.outputs.model_name }}" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "📦 **Artifacts**: Check the artifacts section for model files and demo" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "🔄 **Next Steps**:" >> $GITHUB_STEP_SUMMARY
+        echo "- Test the deployed model" >> $GITHUB_STEP_SUMMARY
+        echo "- Create a Hugging Face Space for interactive demo" >> $GITHUB_STEP_SUMMARY
+        echo "- Share your model with the community!" >> $GITHUB_STEP_SUMMARY

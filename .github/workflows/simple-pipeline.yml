@@ -1,0 +1,184 @@
+name: Automated ML Pipeline
+
+on:
+  workflow_dispatch:
+    inputs:
+      trigger_training:
+        description: 'Trigger Colab training'
+        required: false
+        default: true
+        type: boolean
+      model_size:
+        description: 'Model size to train'
+        required: true
+        default: 'micro'
+        type: choice
+        options:
+          - nano
+          - micro
+          - small
+      max_steps:
+        description: 'Maximum training steps'
+        required: true
+        default: '3000'
+        type: string
+      auto_deploy:
+        description: 'Auto-deploy after training'
+        required: true
+        default: true
+        type: boolean
+
+env:
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  train-and-package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    
+    outputs:
+      model_name: ${{ steps.package.outputs.model_name }}
+      has_model: ${{ steps.detect.outputs.has_model }}
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        cache: 'pip'
+    
+    - name: Install dependencies
+      run: |
+        pip install -r requirements.txt
+    
+    - name: Detect Model Files
+      id: detect
+      run: |
+        echo "🔍 Checking for model files..."
+        if [ -d "checkpoints" ] && [ "$(ls -A checkpoints/*.pt 2>/dev/null)" ]; then
+          latest_model=$(ls -t checkpoints/*.pt | head -1)
+          echo "📁 Latest model: $latest_model"
+          echo "model_path=$latest_model" >> $GITHUB_OUTPUT
+          echo "has_model=true" >> $GITHUB_OUTPUT
+        else
+          echo "❌ No model files found!"
+          echo "has_model=false" >> $GITHUB_OUTPUT
+        fi
+    
+    - name: Validate Model
+      if: steps.detect.outputs.has_model == 'true'
+      run: |
+        echo "🧪 Validating model..."
+        python validate_model.py "${{ steps.detect.outputs.model_path }}"
+    
+    - name: Generate Test Sample
+      if: steps.detect.outputs.has_model == 'true'
+      run: |
+        echo "🎭 Generating test sample..."
+        python generate_cli.py \
+          --checkpoint "${{ steps.detect.outputs.model_path }}" \
+          --prompt "To be or not to be" \
+          --max_tokens 100 \
+          --temperature 0.8 > test_generation.txt
+        
+        echo "📝 Generated sample:"
+        head -5 test_generation.txt
+    
+    - name: Create Model Package
+      id: package
+      if: steps.detect.outputs.has_model == 'true'
+      run: |
+        echo "📦 Creating model package..."
+        
+        # Generate model name
+        timestamp=$(date +%Y%m%d_%H%M%S)
+        model_size="${{ github.event.inputs.model_size || 'micro' }}"
+        model_name="llm-${model_size}-${timestamp}"
+        echo "model_name=$model_name" >> $GITHUB_OUTPUT
+        
+        # Create package directory
+        mkdir -p "packages/$model_name"
+        
+        # Copy files
+        cp "${{ steps.detect.outputs.model_path }}" "packages/$model_name/"
+        cp test_generation.txt "packages/$model_name/"
+        
+        # Create model info
+        python create_model_info.py \
+          "$model_name" \
+          "${{ github.event.inputs.model_size || 'micro' }}" \
+          "${{ github.event.inputs.max_steps || '3000' }}" \
+          "${{ steps.detect.outputs.model_path }}"
+        
+        echo "✅ Package created: packages/$model_name"
+        ls -la "packages/$model_name"
+    
+    - name: Upload Package
+      if: steps.detect.outputs.has_model == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: model-package-${{ steps.package.outputs.model_name }}
+        path: packages/${{ steps.package.outputs.model_name }}/
+        retention-days: 30
+
+  deploy:
+    needs: train-and-package
+    if: github.event.inputs.auto_deploy == 'true' && needs.train-and-package.outputs.has_model == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+    
+    - name: Install deployment dependencies
+      run: |
+        pip install huggingface_hub
+    
+    - name: Download Model Package
+      uses: actions/download-artifact@v4
+      with:
+        name: model-package-${{ needs.train-and-package.outputs.model_name }}
+        path: model_package/
+    
+    - name: Deploy to Hugging Face
+      if: env.HF_TOKEN != ''
+      env:
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        HF_USERNAME: ${{ secrets.HF_USERNAME }}
+      run: |
+        echo "🚀 Deploying to Hugging Face..."
+        python deploy_hf.py "${{ needs.train-and-package.outputs.model_name }}"
+
+  summary:
+    needs: [train-and-package, deploy]
+    if: always()
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Pipeline Summary
+      run: |
+        echo "## 🎉 Automated ML Pipeline Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Model**: ${{ needs.train-and-package.outputs.model_name || 'No model found' }}" >> $GITHUB_STEP_SUMMARY
+        echo "**Packaging**: ${{ needs.train-and-package.result == 'success' && '✅ Success' || '❌ Failed' }}" >> $GITHUB_STEP_SUMMARY
+        echo "**Deployment**: ${{ needs.deploy.result == 'success' && '✅ Success' || (needs.deploy.result == 'skipped' && '⏭️ Skipped' || '❌ Failed') }}" >> $GITHUB_STEP_SUMMARY
+        echo "**Timestamp**: $(date)" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        if [ "${{ needs.deploy.result }}" == "success" ]; then
+          echo "🚀 **Hugging Face**: https://huggingface.co/prashant-2050/${{ needs.train-and-package.outputs.model_name }}" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "📦 **Artifacts**: Check the artifacts section for model package" >> $GITHUB_STEP_SUMMARY
