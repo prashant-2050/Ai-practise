@@ -1,0 +1,194 @@
+name: Train LLM Model
+
+on:
+  workflow_dispatch:  # Manual trigger
+    inputs:
+      model_size:
+        description: 'Model size to train'
+        required: true
+        default: 'micro'
+        type: choice
+        options:
+          - nano
+          - micro
+          - small
+      max_steps:
+        description: 'Maximum training steps'
+        required: true
+        default: '1000'
+        type: string
+      learning_rate:
+        description: 'Learning rate'
+        required: true
+        default: '3e-4'
+        type: string
+  
+  schedule:
+    - cron: '0 2 * * 0'  # Weekly training on Sundays at 2 AM UTC
+
+env:
+  PYTHON_VERSION: '3.11'
+  PYTORCH_VERSION: '2.0.0'
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120  # 2 hours max
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        cache: 'pip'
+    
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential
+    
+    - name: Install Python dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install tensorboard wandb  # Additional training tools
+    
+    - name: Download training data
+      run: |
+        if [ ! -f "shakespeare.txt" ]; then
+          echo "Downloading Shakespeare dataset..."
+          wget -O shakespeare.txt https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt
+        fi
+        echo "✅ Training data ready"
+    
+    - name: Set training parameters
+      run: |
+        echo "MODEL_SIZE=${{ github.event.inputs.model_size || 'micro' }}" >> $GITHUB_ENV
+        echo "MAX_STEPS=${{ github.event.inputs.max_steps || '1000' }}" >> $GITHUB_ENV
+        echo "LEARNING_RATE=${{ github.event.inputs.learning_rate || '3e-4' }}" >> $GITHUB_ENV
+        echo "🎯 Training configuration:"
+        echo "  Model size: ${{ github.event.inputs.model_size || 'micro' }}"
+        echo "  Max steps: ${{ github.event.inputs.max_steps || '1000' }}"
+        echo "  Learning rate: ${{ github.event.inputs.learning_rate || '3e-4' }}"
+    
+    - name: Create checkpoints directory
+      run: |
+        mkdir -p checkpoints
+        mkdir -p logs
+        echo "📁 Directories created"
+    
+    - name: Train model
+      run: |
+        python train_cloud.py \
+          --model_size ${{ env.MODEL_SIZE }} \
+          --max_steps ${{ env.MAX_STEPS }} \
+          --learning_rate ${{ env.LEARNING_RATE }} \
+          --save_dir checkpoints \
+          --log_dir logs \
+          --eval_interval 100 \
+          --save_interval 200
+    
+    - name: Generate sample outputs
+      run: |
+        echo "🎭 Generating sample outputs..."
+        python generate.py \
+          --checkpoint checkpoints/best_model.pt \
+          --prompt "To be or not to be" \
+          --max_tokens 100 \
+          --temperature 0.8 \
+          > sample_outputs.txt
+        
+        echo "## 📝 Sample Generated Text" >> training_summary.md
+        echo '```' >> training_summary.md
+        cat sample_outputs.txt >> training_summary.md
+        echo '```' >> training_summary.md
+    
+    - name: Create training summary
+      run: |
+        echo "# 🎯 Training Summary" > training_summary.md
+        echo "" >> training_summary.md
+        echo "**Model**: ${{ env.MODEL_SIZE }}" >> training_summary.md
+        echo "**Steps**: ${{ env.MAX_STEPS }}" >> training_summary.md
+        echo "**Learning Rate**: ${{ env.LEARNING_RATE }}" >> training_summary.md
+        echo "**Date**: $(date)" >> training_summary.md
+        echo "" >> training_summary.md
+        
+        if [ -f "logs/training.log" ]; then
+          echo "## 📊 Training Logs" >> training_summary.md
+          echo '```' >> training_summary.md
+          tail -20 logs/training.log >> training_summary.md
+          echo '```' >> training_summary.md
+        fi
+    
+    - name: Upload model checkpoints
+      uses: actions/upload-artifact@v3
+      with:
+        name: model-checkpoints-${{ env.MODEL_SIZE }}-${{ github.run_number }}
+        path: |
+          checkpoints/
+          !checkpoints/checkpoint_step_*.pt
+        retention-days: 30
+    
+    - name: Upload training logs
+      uses: actions/upload-artifact@v3
+      with:
+        name: training-logs-${{ github.run_number }}
+        path: |
+          logs/
+          training_summary.md
+          sample_outputs.txt
+        retention-days: 30
+    
+    - name: Upload to Hugging Face (if secrets available)
+      if: env.HF_TOKEN != '' && env.HF_USERNAME != ''
+      env:
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        HF_USERNAME: ${{ secrets.HF_USERNAME }}
+      run: |
+        pip install huggingface_hub
+        python -c "
+        import os
+        from huggingface_hub import HfApi, login
+        
+        # Login to HF
+        login(token=os.environ['HF_TOKEN'])
+        api = HfApi()
+        
+        # Upload model
+        try:
+            api.upload_file(
+                path_or_fileobj='checkpoints/best_model.pt',
+                path_in_repo='pytorch_model.pt',
+                repo_id=f\"{os.environ['HF_USERNAME']}/llm-{os.environ['MODEL_SIZE']}-model\",
+                repo_type='model',
+                create_repo=True
+            )
+            print('✅ Model uploaded to Hugging Face')
+        except Exception as e:
+            print(f'⚠️ Could not upload to HF: {e}')
+        "
+    
+    - name: Training Summary
+      run: |
+        echo "## 🎉 Training Complete!" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "✅ **Model**: ${{ env.MODEL_SIZE }} (${{ env.MAX_STEPS }} steps)" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "📦 **Artifacts Created**:" >> $GITHUB_STEP_SUMMARY
+        echo "- Model checkpoints (best_model.pt, final_model.pt)" >> $GITHUB_STEP_SUMMARY
+        echo "- Training logs and metrics" >> $GITHUB_STEP_SUMMARY
+        echo "- Sample generated text" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "🔗 **Download**: Check the 'Artifacts' section below" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        if [ -f "sample_outputs.txt" ]; then
+          echo "🎭 **Sample Output**:" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          head -5 sample_outputs.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+        fi

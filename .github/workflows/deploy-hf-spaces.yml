@@ -1,0 +1,128 @@
+name: Deploy to Hugging Face Spaces
+
+on:
+  push:
+    branches: [ main ]  # Triggers on push to main branch
+  workflow_dispatch:  # Allows manual triggering from GitHub UI
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Fetch full history for proper Git operations
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install huggingface_hub
+    
+    - name: Configure Git
+      run: |
+        git config --global user.email "action@github.com"
+        git config --global user.name "GitHub Action"
+    
+    - name: Login to Hugging Face
+      env:
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      run: |
+        python -c "
+        from huggingface_hub import login
+        import os
+        login(token=os.environ['HF_TOKEN'])
+        print('✅ Successfully logged in to Hugging Face')
+        "
+    
+    - name: Create/Update Hugging Face Space
+      env:
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        HF_USERNAME: ${{ secrets.HF_USERNAME }}
+        SPACE_NAME: ${{ secrets.SPACE_NAME }}
+      run: |
+        python -c "
+        import os
+        from huggingface_hub import HfApi, create_repo
+        
+        # Get environment variables
+        hf_token = os.environ['HF_TOKEN']
+        hf_username = os.environ['HF_USERNAME']
+        space_name = os.environ['SPACE_NAME']
+        
+        # Initialize HF API
+        api = HfApi(token=hf_token)
+        
+        # Create space repository name
+        repo_id = f'{hf_username}/{space_name}'
+        print(f'📦 Deploying to: https://huggingface.co/spaces/{repo_id}')
+        
+        try:
+            # Try to create the space (will skip if exists)
+            create_repo(
+                repo_id=repo_id,
+                repo_type='space',
+                space_sdk='gradio',
+                token=hf_token,
+                exist_ok=True
+            )
+            print('✅ Space repository ready')
+        except Exception as e:
+            print(f'⚠️  Space might already exist: {e}')
+        
+        # Upload all necessary files
+        files_to_upload = [
+            'app.py',
+            'requirements.txt',
+            'model_config.py',
+            'light_llm.py',
+            'dataset.py',
+            'generate.py',
+            'gradio_app.py',
+            'README.md'
+        ]
+        
+        for file_path in files_to_upload:
+            if os.path.exists(file_path):
+                try:
+                    api.upload_file(
+                        path_or_fileobj=file_path,
+                        path_in_repo=file_path,
+                        repo_id=repo_id,
+                        repo_type='space',
+                        token=hf_token
+                    )
+                    print(f'✅ Uploaded: {file_path}')
+                except Exception as e:
+                    print(f'❌ Failed to upload {file_path}: {e}')
+            else:
+                print(f'⚠️  File not found: {file_path}')
+        
+        print(f'🚀 Deployment complete! View your space at:')
+        print(f'https://huggingface.co/spaces/{repo_id}')
+        "
+    
+    - name: Deployment Summary
+      run: |
+        echo "## 🎉 Deployment Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "✅ **Status**: Successfully deployed to Hugging Face Spaces" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "🔗 **Live Demo**: https://huggingface.co/spaces/${{ secrets.HF_USERNAME }}/${{ secrets.SPACE_NAME }}" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "📦 **Files Deployed**:" >> $GITHUB_STEP_SUMMARY
+        echo "- app.py (Entry point)" >> $GITHUB_STEP_SUMMARY
+        echo "- requirements.txt (Dependencies)" >> $GITHUB_STEP_SUMMARY
+        echo "- model_config.py (Model configuration)" >> $GITHUB_STEP_SUMMARY
+        echo "- light_llm.py (Transformer implementation)" >> $GITHUB_STEP_SUMMARY
+        echo "- gradio_app.py (Web interface)" >> $GITHUB_STEP_SUMMARY
+        echo "- dataset.py (Data handling)" >> $GITHUB_STEP_SUMMARY
+        echo "- generate.py (Text generation)" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "⏱️ **Next Update**: Automatic on next push to main branch" >> $GITHUB_STEP_SUMMARY
