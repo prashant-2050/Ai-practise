@@ -204,7 +204,7 @@ def main():
     """Main training function"""
     
     # Configuration
-    config = ModelConfig.micro()  # ~30M parameters
+    config = ModelConfig.nano()  # ~22M parameters (smaller, faster)
     
     # Prepare dataset
     print("Preparing dataset...")
@@ -220,8 +220,8 @@ def main():
         model=model,
         train_loader=train_loader,
         learning_rate=3e-4,
-        max_steps=500,  # Small number for demo
-        eval_interval=100,
+        max_steps=200,  # Quick demo training
+        eval_interval=50,
         save_dir="checkpoints"
     )
     

@@ -6,7 +6,7 @@ on:
       model_size:
         description: 'Model size to train'
         required: true
-        default: 'micro'
+        default: 'nano'
         type: choice
         options:
           - nano
@@ -15,7 +15,7 @@ on:
       max_steps:
         description: 'Maximum training steps'
         required: true
-        default: '1000'
+        default: '100'
         type: string
       learning_rate:
         description: 'Learning rate'
@@ -35,8 +35,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 360  # 6 hours max
     env:
-      MODEL_SIZE: ${{ github.event.inputs.model_size || 'micro' }}
-      MAX_STEPS: ${{ github.event.inputs.max_steps || '1000' }}
+      MODEL_SIZE: ${{ github.event.inputs.model_size || 'nano' }}
+      MAX_STEPS: ${{ github.event.inputs.max_steps || '100' }}
       LEARNING_RATE: ${{ github.event.inputs.learning_rate || '3e-4' }}
     
     steps:
@@ -72,12 +72,12 @@ jobs:
     
     - name: Set training parameters
       run: |
-        echo "MODEL_SIZE=${{ github.event.inputs.model_size || 'micro' }}" >> $GITHUB_ENV
-        echo "MAX_STEPS=${{ github.event.inputs.max_steps || '1000' }}" >> $GITHUB_ENV
+        echo "MODEL_SIZE=${{ github.event.inputs.model_size || 'nano' }}" >> $GITHUB_ENV
+        echo "MAX_STEPS=${{ github.event.inputs.max_steps || '100' }}" >> $GITHUB_ENV
         echo "LEARNING_RATE=${{ github.event.inputs.learning_rate || '3e-4' }}" >> $GITHUB_ENV
         echo "🎯 Training configuration:"
-        echo "  Model size: ${{ github.event.inputs.model_size || 'micro' }}"
-        echo "  Max steps: ${{ github.event.inputs.max_steps || '1000' }}"
+        echo "  Model size: ${{ github.event.inputs.model_size || 'nano' }}"
+        echo "  Max steps: ${{ github.event.inputs.max_steps || '100' }}"
         echo "  Learning rate: ${{ github.event.inputs.learning_rate || '3e-4' }}"
     
     - name: Create checkpoints directory
@@ -85,32 +85,42 @@ jobs:
         mkdir -p checkpoints
         mkdir -p logs
         echo "📁 Directories created"
+        
+        # System diagnostics
+        echo "🔍 System resources:"
+        echo "  CPU cores: $(nproc)"
+        echo "  Memory: $(free -h)"
+        echo "  Disk space: $(df -h /)"
+        echo "  Python processes: $(ps aux | grep python | wc -l)"
     
     - name: Train model
       run: |
         set -euxo pipefail
         echo "🚀 Starting training..."
+        echo "Memory before training: $(free -h)"
+        
         # start a background heartbeat to keep alive logs in case of long silence
-        (while true; do echo "[heartbeat] $(date)"; sleep 60; done) &
+        (while true; do echo "[heartbeat] $(date) - Memory: $(free -m | grep '^Mem:' | awk '{print $3"MB used"}')"; sleep 60; done) &
         HEARTBEAT_PID=$!
 
         mkdir -p logs
-        # Stream both stdout and stderr to the Actions log and to a persisted logfile
-        python train_cloud.py \
+        # Use timeout command to limit training time and add memory monitoring
+        timeout 1800 python train_cloud.py \
           --model_size "$MODEL_SIZE" \
           --max_steps "$MAX_STEPS" \
           --learning_rate "$LEARNING_RATE" \
-          --batch_size "${BATCH_SIZE:-32}" \
-          --gradient_accumulation_steps "${GRAD_ACCUM_STEPS:-1}" \
-          --device "${DEVICE:-auto}" \
+          --batch_size "${BATCH_SIZE:-16}" \
+          --gradient_accumulation_steps "${GRAD_ACCUM_STEPS:-2}" \
+          --device "${DEVICE:-cpu}" \
           --mixed_precision "${GPU_AVAILABLE:-false}" \
           --save_dir checkpoints \
           --log_dir logs \
-          --eval_interval 100 \
-          --save_interval 200 2>&1 | tee logs/training.log
+          --eval_interval 25 \
+          --save_interval 50 2>&1 | tee logs/training.log
 
         # stop heartbeat
         kill "$HEARTBEAT_PID" || true
+        echo "Memory after training: $(free -h)"
     
     - name: Generate sample outputs
       run: |

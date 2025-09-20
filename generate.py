@@ -27,7 +27,7 @@ class TextGenerator:
         
         # Load model
         print(f"Loading model from {model_path}")
-        checkpoint = torch.load(model_path, map_location=self.device)
+        checkpoint = torch.load(model_path, map_location=self.device, weights_only=False)
         
         self.config = checkpoint['config']
         self.model = LightLLM(self.config)
